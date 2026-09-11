@@ -1,1 +1,1 @@
-python video_note_bot-2.py
+worker: python video_note_bot-2.py
