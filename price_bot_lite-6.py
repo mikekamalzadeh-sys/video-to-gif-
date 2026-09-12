@@ -42,7 +42,7 @@ BASE_URL = f"https://api.splus.ir/bot{BOT_TOKEN}"
 
 # کلید رایگان BrsApi (برای دلار و طلای ۱۸ عیار)
 # ثبت‌نام رایگان: https://brsapi.ir/free-api-gold-currency-webservice/
-BRSAPI_KEY = "BmheKA6XdLbzSL9YyGSgwzrdwqssQztK"
+BRSAPI_KEY = "Bs9BZaDzfZLCakW65QEKKDNFdttG5qZ6"
 BRSAPI_URL = "https://Api.BrsApi.ir/Market/Gold_Currency.php"
 
 # API عمومیِ آمار بازار نوبیتکس - نیازی به کلید ندارد
