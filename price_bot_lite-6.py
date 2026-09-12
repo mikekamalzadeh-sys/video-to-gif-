@@ -48,7 +48,7 @@ BRSAPI_URL = "https://Api.BrsApi.ir/Market/Gold_Currency.php"
 # API عمومیِ آمار بازار نوبیتکس - نیازی به کلید ندارد
 NOBITEX_STATS_URL = "https://apiv2.nobitex.ir/market/stats"
 
-RAW_DEBUG = False  # برای دیباگ اولیه True کن تا خروجی خام هر دو API چاپ شود
+RAW_DEBUG = True  # برای دیباگ اولیه True کن تا خروجی خام هر دو API چاپ شود
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("soroush-price-bot-lite")
