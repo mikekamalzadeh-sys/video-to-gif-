@@ -1,74 +1,63 @@
-import os
+import requests
 import sqlite3
-from splusthon import SoroushClient, events
-from splusthon.sessions import StringSession
+import time
 
-SESSION_STRING = os.environ.get("SESSION_STRING", "")
+TOKEN = "70122752:B-Jm-iWBnuMfehi4Z25zXLnhpPw4cnvCNds"
+URL = f"https://splus.ir/bot{TOKEN}/"
 
-# راه‌اندازی دیتابیس برای ذخیره متن منشی
-def init_db():
-    conn = sqlite3.connect('user_bot.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY, 
-                    value TEXT
-                )''')
-    # اگر متنی نبود، یک متن پیش‌فرض بگذار
-    c.execute('INSERT OR IGNORE INTO settings (key, value) VALUES ("auto_text", "سلام، در حال حاضر آنلاین نیستم. به زودی پاسخ خواهم داد.")')
-    conn.commit()
-    conn.close()
+# اتصال به دیتابیس SQLite برای مدیریت کاربران و داده‌ها
+conn = sqlite3.connect('shop_data.db')
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        step TEXT
+    )
+''')
+conn.commit()
 
-def get_auto_text():
-    conn = sqlite3.connect('user_bot.db')
-    c = conn.cursor()
-    c.execute('SELECT value FROM settings WHERE key="auto_text"')
-    res = c.fetchone()
-    conn.close()
-    return res[0] if res else "سلام، در حال حاضر آنلاین نیستم."
+def get_updates(offset=None):
+    url = URL + "getUpdates"
+    params = {"timeout": 100, "offset": offset}
+    try:
+        response = requests.get(url, params=params, timeout=110)
+        return response.json()
+    except Exception as e:
+        print(f"خطا در دریافت آپدیت‌ها: {e}")
+        return {}
 
-def set_auto_text(new_text):
-    conn = sqlite3.connect('user_bot.db')
-    c = conn.cursor()
-    c.execute('UPDATE settings SET value=? WHERE key="auto_text"', (new_text,))
-    conn.commit()
-    conn.close()
-
-init_db()
-
-session = StringSession(SESSION_STRING)
-client = SoroushClient(session)
-
-@client.on(events.NewMessage(outgoing=False))
-async def auto_reply_handler(event):
-    # اگر پیام در پی‌وی (چت شخصی) باشد و از طرف خودت نباشد
-    if event.is_private and not event.out:
-        current_text = get_auto_text()
-        await event.respond(current_text)
-        print(f"📩 پیام از {event.chat_id} آمد و پاسخ خودکار ارسال شد.")
-
-@client.on(events.NewMessage(outgoing=True))
-async def change_text_command(event):
-    # برای تغییر متن، کافی است در چت ذخیره شده خودت (Saved Messages) بنویسی: .settext متن جدید
-    if event.raw_text and event.raw_text.startswith(".settext "):
-        new_text = event.raw_text.replace(".settext ", "", 1).strip()
-        set_auto_text(new_text)
-        await event.edit(f"✅ متن پاسخ خودکار با موفقیت تغییر کرد به:\n\n{new_text}")
-        print(f"🔄 متن منشی بروز شد.")
+def send_message(chat_id, text):
+    url = URL + "sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"خطا در ارسال پیام: {e}")
 
 def main():
-    print("🚀 در حال راه‌اندازی یوزربات منشی...")
-    client.start()
-    
-    if not SESSION_STRING:
-        print("\n🔑 رشته سشن شما (این را کپی کنید و در متغیرهای محیطی Railway بگذارید):\n")
-        print(client.session.save())
-        print("\n" + "="*50 + "\n")
+    print("ربات سروش‌پلاس با موفقیت روشن شد و در حال گوش دادن به پیام‌هاست...")
+    offset = None
+    while True:
+        updates = get_updates(offset)
+        if "result" in updates:
+            for update in updates["result"]:
+                offset = update["update_id"] + 1
+                
+                # بررسی وجود پیام در به‌روزرسانی
+                if "message" in update:
+                    chat_id = update["message"]["chat"]["chat_id"]
+                    text = update["message"].get("text", "")
+                    
+                    print(f"پیام جدید از {chat_id}: {text}")
+                    
+                    # پاسخ به دستور start/
+                    if text == "/start":
+                        send_message(chat_id, "سلام! ربات شما با موفقیت روی سروش‌پلاس فعال شد.")
+                    else:
+                        send_message(chat_id, f"پیام شما دریافت شد: {text}")
+        
+        time.sleep(1)
 
-    print("✅ یوزربات آماده به کار است!")
-    print("💡 نکته: برای تغییر متن منشی، کافی است در چت ذخیره شده خودت دستور زیر را بفرست:")
-    print("   .settext متن جدید شما")
-    client.run_until_disconnected()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
     
