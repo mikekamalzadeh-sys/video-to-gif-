@@ -1,294 +1,166 @@
-# -*- coding: utf-8 -*-
-"""
-بات قیمت لحظه‌ای طلای تتری (XAUT) و رمزارزهای معروف برای سروش‌پلاس
-(نسخه سبک)
---------------------------------------------------------------------------
-این نسخه فقط از کتابخانه `requests` استفاده می‌کند و مستقیم با HTTP API
-بات سروش‌پلاس صحبت می‌کند (بدون aiosplus/pydantic).
-
-همه‌ی قیمت‌ها از یک منبع عمومی و بدون نیاز به کلید گرفته می‌شوند:
-API عمومیِ آمار بازار نوبیتکس (Nobitex) - endpoint: /market/stats
-
-نصب:
-    pip install requests
-
-اجرا:
-    python price_bot_lite.py
-"""
-
-import json
-import logging
-import time
-from datetime import datetime, timezone, timedelta
-
 import requests
+import time
+import json
+import sqlite3
+import os
 
-# ============================ تنظیمات ============================
+# توکن جدید ربات سروش‌پلاس
+TOKEN = "70122752:MfH36TGtbSxM18rL7EApd4jUKicb_D5bUrk"
+BASE_URL = "https://api.splus.ir/bot" + TOKEN
+user_steps = {}
 
-BOT_TOKEN = "69896472:tp2llzJ_BXZqA9QYQUxLpJ7kESw8VayiIkw"
+def init_db():
+    conn = sqlite3.connect('splus_manager.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY, 
+                    phone TEXT, 
+                    session_key TEXT, 
+                    auto_reply_text TEXT DEFAULT "سلام، در حال حاضر آنلاین نیستم. به زودی پاسخ خواهم داد.", 
+                    is_active INTEGER DEFAULT 1
+                )''')
+    conn.commit()
+    conn.close()
 
-# پایه آدرس API سروش‌پلاس
-BASE_URL = f"https://api.splus.ir/bot{BOT_TOKEN}"
+def get_user(user_id):
+    conn = sqlite3.connect('splus_manager.db')
+    c = conn.cursor()
+    c.execute('SELECT phone, session_key, auto_reply_text, is_active FROM users WHERE user_id=?', (user_id,))
+    res = c.fetchone()
+    conn.close()
+    return res
 
-# API عمومیِ آمار بازار نوبیتکس - نیازی به کلید ندارد
-NOBITEX_STATS_URL = "https://apiv2.nobitex.ir/market/stats"
+def save_user_phone(user_id, phone):
+    conn = sqlite3.connect('splus_manager.db')
+    c = conn.cursor()
+    # اگر کاربر از قبل بود شماره‌اش آپدیت میشه، وگرنه اضافه میشه
+    c.execute('''INSERT INTO users (user_id, phone, session_key, auto_reply_text, is_active) 
+                 VALUES (?, ?, NULL, "سلام، در حال حاضر آنلاین نیستم. به زودی پاسخ خواهم داد.", 1)
+                 ON CONFLICT(user_id) DO UPDATE SET phone=excluded.phone''', (user_id, phone))
+    conn.commit()
+    conn.close()
 
-# سرورهایی مثل ریل‌وی معمولاً با ساعت UTC کار می‌کنن، نه ساعت تهران؛
-# چون خیلی از ایمیج‌های سبک، دیتابیس کامل منطقه‌های زمانی رو ندارن، به‌جای
-# zoneinfo از افست ثابت +۳:۳۰ استفاده می‌کنیم تا همیشه مطمئن کار کنه.
-TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+def save_user_text(user_id, text):
+    conn = sqlite3.connect('splus_manager.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET auto_reply_text=? WHERE user_id=?', (text, user_id))
+    conn.commit()
+    conn.close()
 
-RAW_DEBUG = False  # برای دیباگ اولیه True کن تا خروجی خام API چاپ شود
+init_db()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("soroush-price-bot-lite")
-
-# ============================ تعریف دارایی‌ها ============================
-#
-# همه از نوبیتکس، جفت‌ارز به ریال (rls) گرفته می‌شوند.
-
-ASSETS = {
-    "gold_xaut": {
-        "title": "طلای تتری (XAUT)", "short": "طلا (XAUT)", "emoji": "🥇",
-        "nobitex_symbol": "xaut-rls",
-    },
-    "btc": {
-        "title": "بیت‌کوین", "short": "بیت‌کوین", "emoji": "₿",
-        "nobitex_symbol": "btc-rls",
-    },
-    "eth": {
-        "title": "اتریوم", "short": "اتریوم", "emoji": "⧫",
-        "nobitex_symbol": "eth-rls",
-    },
-    "usdt": {
-        "title": "تتر", "short": "تتر", "emoji": "💰",
-        "nobitex_symbol": "usdt-rls",
-    },
-    "trx": {
-        "title": "ترون", "short": "ترون", "emoji": "🔺",
-        "nobitex_symbol": "trx-rls",
-    },
-    "bnb": {
-        "title": "بایننس کوین", "short": "بایننس کوین", "emoji": "🟡",
-        "nobitex_symbol": "bnb-rls",
-    },
-    "xrp": {
-        "title": "ریپل", "short": "ریپل", "emoji": "💧",
-        "nobitex_symbol": "xrp-rls",
-    },
-    "doge": {
-        "title": "دوج‌کوین", "short": "دوج‌کوین", "emoji": "🐕",
-        "nobitex_symbol": "doge-rls",
-    },
-    "ada": {
-        "title": "کاردانو", "short": "کاردانو", "emoji": "🔷",
-        "nobitex_symbol": "ada-rls",
-    },
-    "ton": {
-        "title": "گرام (GRAM)", "short": "گرام", "emoji": "💎",
-        "nobitex_symbol": "gram-rls",
-    },
-    "sol": {
-        "title": "سولانا", "short": "سولانا", "emoji": "🟣",
-        "nobitex_symbol": "sol-rls",
-    },
-    "ltc": {
-        "title": "لایت‌کوین", "short": "لایت‌کوین", "emoji": "⚪",
-        "nobitex_symbol": "ltc-rls",
-    },
-}
-
-
-# ============================ ابزارهای قیمت ============================
-
-def _to_float(value):
+def get_updates(offset=None):
+    url = BASE_URL + '/getUpdates'
+    params = {'timeout': 3}
+    if offset:
+        params['offset'] = offset
     try:
-        return float(str(value).replace(",", "").replace("%", "").strip())
-    except (TypeError, ValueError):
-        return None
+        res = requests.get(url, params=params, timeout=5)
+        return res.json()
+    except:
+        return {'ok': False, 'result': []}
 
+def send_message(chat_id, text, parse_mode=None, reply_markup=None):
+    url = BASE_URL + '/sendMessage'
+    params = {'chat_id': chat_id, 'text': text}
+    if parse_mode:
+        params['parse_mode'] = parse_mode
+    if reply_markup:
+        params['reply_markup'] = json.dumps(reply_markup)
+    try:
+        res = requests.get(url, params=params, timeout=15)
+        return res.json()
+    except:
+        return {'ok': False}
 
-def fetch_prices():
-    """
-    یک درخواست به نوبیتکس برای همه‌ی نمادهای تعریف‌شده در ASSETS.
-    """
-    symbols = ",".join(cfg["nobitex_symbol"].split("-")[0] for cfg in ASSETS.values())
-    resp = requests.get(
-        NOBITEX_STATS_URL,
-        params={"srcCurrency": symbols, "dstCurrency": "rls"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if RAW_DEBUG:
-        log.info("RAW Nobitex response: %s", data)
-    return data
-
-
-def format_price_message(asset_key, data):
-    cfg = ASSETS[asset_key]
-
-    stats = data.get("stats", {}) if isinstance(data, dict) else {}
-    item = stats.get(cfg["nobitex_symbol"])
-
-    if not item:
-        return f"{cfg['emoji']} متأسفانه قیمت «{cfg['title']}» الان در دسترس نیست.\nچند لحظه دیگر دوباره امتحان کن."
-
-    price_val = None
-    best_sell = _to_float(item.get("bestSell"))
-    best_buy = _to_float(item.get("bestBuy"))
-    if best_sell and best_buy:
-        # میانگین بهترین خرید و فروش = قیمت لحظه‌ای بازار (mid-price)،
-        # که برخلاف «آخرین معامله» همیشه لحظه‌ای و بدون تاخیره
-        price_val = (best_sell + best_buy) / 2
-    else:
-        price_val = _to_float(item.get("latest") or item.get("bestSell") or item.get("bestBuy"))
-
-    change_val = _to_float(item.get("dayChange"))
-
-    lines = [f"{cfg['emoji']} {cfg['title']}", ""]
-
-    if price_val is not None:
-        rial, toman = price_val, price_val / 10
-        lines.append(f"🔹 قیمت لحظه‌ای: {rial:,.0f} ریال")
-        lines.append(f"   ({toman:,.0f} تومان)")
-
-        # معادل دلاری: چون نوبیتکس نرخ رسمی دلار نمی‌ده، از قیمت تتر به
-        # ریال (usdt-rls) به‌عنوان نرخ تقریبی دلار استفاده می‌کنیم.
-        usdt_item = stats.get("usdt-rls")
-        usd_rate = _to_float(usdt_item.get("latest") or usdt_item.get("bestSell")) if usdt_item else None
-        if usd_rate and asset_key != "usdt":
-            usd_equiv = price_val / usd_rate
-            lines.append(f"💲 معادل دلاری: {usd_equiv:,.2f} $")
-    else:
-        lines.append("🔹 قیمت لحظه‌ای: نامشخص")
-
-    if change_val is not None:
-        arrow = "🟢 رشد" if change_val > 0 else ("🔴 افت" if change_val < 0 else "⚪️ بدون تغییر")
-        lines.append(f"📊 تغییر ۲۴ ساعت اخیر: {change_val:+.2f}٪ ({arrow})")
-    else:
-        lines.append("📊 تغییر ۲۴ ساعت اخیر: نامشخص")
-
-    lines.append(f"🕒 به‌روزرسانی: {datetime.now(TEHRAN_TZ).strftime('%H:%M:%S')}")
-    return "\n".join(lines)
-
-
-# ============================ کیبوردها (JSON خام) ============================
-
-def main_menu_kb():
-    row = [{"text": f"{cfg['emoji']} {cfg['short']}", "callback_data": f"price:{key}"}
-           for key, cfg in ASSETS.items()]
-    rows = [row[i:i + 2] for i in range(0, len(row), 2)]
-    return {"inline_keyboard": rows}
-
-
-def asset_kb(asset_key):
-    return {
-        "inline_keyboard": [[
-            {"text": "🔄 به‌روزرسانی", "callback_data": f"price:{asset_key}"},
-            {"text": "🔙 بازگشت به منو", "callback_data": "menu"},
-        ]]
+def main_menu(chat_id):
+    keyboard = {
+        'keyboard': [
+            [{'text': '⚙️ تنظیم متن پاسخ خودکار 📝'}],
+            [{'text': '🔄 وضعیت منشی: روشن/خاموش 🟢'}],
+            [{'text': '👤 اطلاعات اکانت من 📊'}]
+        ],
+        'resize_keyboard': True
     }
+    text = '🤖✨ به ربات منشی خودکار سروش‌پلاس خوش آمدید!\n\nوقتی شما آفلاین باشید، این ربات به صورت اتوماتیک به پیام‌های دریافتی پاسخ می‌دهد.\n\n👇 لطفاً یک گزینه را انتخاب کنید:'
+    send_message(chat_id, text, parse_mode='Markdown', reply_markup=keyboard)
 
+print('🚀🤖 ربات منشی عمومی سروش‌پلاس روشن شد و آماده کاره...')
+last_update_id = 0
 
-# ============================ توابع خام API سروش‌پلاس ============================
+while True:
+    updates = get_updates(last_update_id + 1)
+    if updates.get('ok') and updates.get('result'):
+        for update in updates['result']:
+            last_update_id = update['update_id']
+            
+            if 'message' in update:
+                message = update['message']
+                chat_id = message['chat']['id']
+                text = message.get('text', '')
+                step = user_steps.get(str(chat_id), {})
+                
+                # بررسی اینکه کاربر شماره تلفن خود را شیر کرده است
+                if 'contact' in message:
+                    phone = message['contact'].get('phone_number', '')
+                    save_user_phone(chat_id, phone)
+                    user_steps[str(chat_id)] = {'step': 'waiting_for_code'}
+                    send_message(chat_id, '✅ شماره شما با موفقیت ثبت شد!\n\n🔑 اکنون کد ورود ارسال شده به اکانت سروش‌پلاس خود را وارد کنید:', reply_markup={'remove_keyboard': True})
+                
+                elif text == '/start':
+                    user_data = get_user(chat_id)
+                    if not user_data or not user_data[0]:
+                        contact_keyboard = {
+                            'keyboard': [
+                                [{'text': '📱 اشتراک‌گذاری شماره تلفن من 📞', 'request_contact': True}]
+                            ],
+                            'resize_keyboard': True,
+                            'one_time_keyboard': True
+                        }
+                        send_message(chat_id, '👋 سلام!\nبرای راه‌اندازی منشی خودکار، لطفاً روی دکمه زیر کلیک کنید تا شماره تلفن شما ثبت شود:', reply_markup=contact_keyboard)
+                    else:
+                        main_menu(chat_id)
+                        user_steps[str(chat_id)] = {}
+                
+                elif step.get('step') == 'waiting_for_code':
+                    code = text.strip()
+                    user_steps[str(chat_id)] = {}
+                    send_message(chat_id, '✅ کد تایید (' + code + ') با موفقیت دریافت شد! 🎉\nمنشی شما آماده به کار است.')
+                    main_menu(chat_id)
+                
+                elif text == '⚙️ تنظیم متن پاسخ خودکار 📝':
+                    user_steps[str(chat_id)] = {'step': 'set_auto_text'}
+                    send_message(chat_id, '✍️ لطفاً متن جدید پاسخ خودکار را ارسال کنید (این متن وقتی آفلاین باشید به مخاطبان فرستاده می‌شود):')
+                
+                elif step.get('step') == 'set_auto_text':
+                    save_user_text(chat_id, text)
+                    user_steps[str(chat_id)] = {}
+                    send_message(chat_id, '✅ متن پاسخ خودکار با موفقیت ذخیره شد! 👍')
+                    main_menu(chat_id)
+                
+                elif text == '🔄 وضعیت منشی: روشن/خاموش 🟢':
+                    conn = sqlite3.connect('splus_manager.db')
+                    c = conn.cursor()
+                    c.execute('SELECT is_active FROM users WHERE user_id=?', (chat_id,))
+                    res = c.fetchone()
+                    current_status = res[0] if res else 1
+                    new_status = 0 if current_status == 1 else 1
+                    c.execute('UPDATE users SET is_active=? WHERE user_id=?', (new_status, chat_id))
+                    conn.commit()
+                    conn.close()
+                    status_str = 'روشن 🟢' if new_status == 1 else 'خاموش 🔴'
+                    send_message(chat_id, '⚙️ وضعیت منشی خودکار تغییر کرد به: ' + status_str)
+                
+                elif text == '👤 اطلاعات اکانت من 📊':
+                    u = get_user(chat_id)
+                    if u:
+                        phone = u[0] or 'ثبت نشده'
+                        auto_txt = u[2]
+                        status = 'روشن 🟢' if u[3] == 1 else 'خاموش 🔴'
+                        info = '📊👤 اطلاعات اکانت شما:\n\n📱 شماره: ' + phone + '\n🔄 وضعیت منشی: ' + status + '\n\n📝 متن پاسخ خودکار فعلی:\n"' + auto_txt + '"'
+                        send_message(chat_id, info, parse_mode='Markdown')
+                    else:
+                        send_message(chat_id, '⚠️ ابتدا دستور /start را بزنید.')
 
-def api_call(method, payload=None):
-    url = f"{BASE_URL}/{method}"
-    resp = requests.post(url, json=payload or {}, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def send_message(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
-    return api_call("sendMessage", payload)
-
-
-def edit_message_text(chat_id, message_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
-    return api_call("editMessageText", payload)
-
-
-def answer_callback_query(callback_query_id, text=None):
-    payload = {"callback_query_id": callback_query_id}
-    if text:
-        payload["text"] = text
-    return api_call("answerCallbackQuery", payload)
-
-
-def get_updates(offset=None, timeout=30):
-    payload = {"timeout": timeout}
-    if offset is not None:
-        payload["offset"] = offset
-    return api_call("getUpdates", payload)
-
-
-# ============================ منطق اصلی بات ============================
-
-def handle_update(update):
-    if "message" in update:
-        message = update["message"]
-        chat_id = message["chat"]["id"]
-        text = message.get("text", "")
-        if text and text.startswith("/start"):
-            send_message(
-                chat_id,
-                "سلام 👋\nیکی از گزینه‌های زیر رو بزن تا قیمت لحظه‌ای‌شو با آمار ۲۴ ساعت اخیر ببینی:",
-                reply_markup=main_menu_kb(),
-            )
-        return
-
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        cq_id = cq["id"]
-        data = cq.get("data", "")
-        message = cq["message"]
-        chat_id = message["chat"]["id"]
-        message_id = message["message_id"]
-
-        if data == "menu":
-            answer_callback_query(cq_id)
-            edit_message_text(
-                chat_id, message_id,
-                "یکی از گزینه‌های زیر رو بزن تا قیمت لحظه‌ای‌شو ببینی:",
-                reply_markup=main_menu_kb(),
-            )
-            return
-
-        if data.startswith("price:"):
-            asset_key = data.split(":", 1)[1]
-            answer_callback_query(cq_id, "در حال دریافت قیمت...")
-            try:
-                prices = fetch_prices()
-                text = format_price_message(asset_key, prices)
-            except Exception:
-                log.exception("خطا در دریافت قیمت از نوبیتکس")
-                text = "⚠️ خطا در دریافت قیمت. لطفاً چند لحظه دیگر دوباره امتحان کن."
-            edit_message_text(chat_id, message_id, text, reply_markup=asset_kb(asset_key))
-            return
-
-
-def main():
-    log.info("بات (نسخه سبک) در حال اجراست...")
-    offset = None
-    while True:
-        try:
-            result = get_updates(offset=offset)
-            for update in result.get("result", []):
-                offset = update["update_id"] + 1
-                try:
-                    handle_update(update)
-                except Exception:
-                    log.exception("خطا در پردازش یک آپدیت")
-        except requests.exceptions.RequestException:
-            log.exception("خطا در اتصال به API؛ ۵ ثانیه دیگر دوباره تلاش می‌شود")
-            time.sleep(5)
-
-
-if __name__ == "__main__":
-    main()
+    time.sleep(1)
+    
