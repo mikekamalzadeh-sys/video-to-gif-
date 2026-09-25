@@ -1,2 +1,4 @@
 requests
 vosk
+pip install splusthon
+
